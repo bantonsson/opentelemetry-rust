@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 thread_local! {
-    static CURRENT_CONTEXT: RefCell<Context> = RefCell::new(Context::default());
+    static CURRENT_CONTEXT: RefCell<ContextStack> = RefCell::new(ContextStack::default());
 }
 
 /// An execution-scoped collection of values.
@@ -122,7 +122,7 @@ impl Context {
     /// Note: This function will panic if you attempt to attach another context
     /// while the current one is still borrowed.
     pub fn map_current<T>(f: impl FnOnce(&Context) -> T) -> T {
-        CURRENT_CONTEXT.with(|cx| f(&cx.borrow()))
+        CURRENT_CONTEXT.with(|cx| cx.borrow().map_current_cx(f))
     }
 
     /// Returns a clone of the current thread's context with the given value.
@@ -298,12 +298,10 @@ impl Context {
     /// assert_eq!(Context::current().get::<ValueA>(), None);
     /// ```
     pub fn attach(self) -> ContextGuard {
-        let previous_cx = CURRENT_CONTEXT
-            .try_with(|current| current.replace(self))
-            .ok();
+        let cx_id = CURRENT_CONTEXT.with(|cx| cx.borrow_mut().push(self));
 
         ContextGuard {
-            previous_cx,
+            cx_pos: cx_id,
             _marker: PhantomData,
         }
     }
@@ -346,15 +344,17 @@ impl fmt::Debug for Context {
 /// A guard that resets the current context to the prior context when dropped.
 #[allow(missing_debug_implementations)]
 pub struct ContextGuard {
-    previous_cx: Option<Context>,
-    // ensure this type is !Send as it relies on thread locals
+    // The position of the context in the stack. This is used to pop the context.
+    cx_pos: usize,
+    // Ensure this type is !Send as it relies on thread locals
     _marker: PhantomData<*const ()>,
 }
 
 impl Drop for ContextGuard {
     fn drop(&mut self) {
-        if let Some(previous_cx) = self.previous_cx.take() {
-            let _ = CURRENT_CONTEXT.try_with(|current| current.replace(previous_cx));
+        let id = self.cx_pos;
+        if id > 0 {
+            CURRENT_CONTEXT.with(|context_stack| context_stack.borrow_mut().pop_id(id));
         }
     }
 }
@@ -378,6 +378,87 @@ impl Hasher for IdHasher {
     #[inline]
     fn finish(&self) -> u64 {
         self.0
+    }
+}
+
+/// A stack for keeping track of the [`Context`] instances that have been attached
+/// to a thread.
+///
+/// The stack allows for popping of contexts by position, which is used to do out
+/// of order dropping of [`ContextGuard`] instances. Only when the top of the
+/// stack is popped, the topmost [`Context`] is actually restored.
+///
+/// The stack relies on the fact that it is thread local and that the
+/// [`ContextGuard`] instances that are constructed using it can't be shared with
+/// other threads.
+struct ContextStack {
+    /// This is the current [`Context`] that is active on this thread, and the top
+    /// of the [`ContextStack`]. It is always present, and if the `stack` is empty
+    /// it's an empty [`Context`].
+    ///
+    /// Having this here allows for fast access to the current [`Context`].
+    current_cx: Context,
+    /// A `stack` of the other contexts that have been attached to the thread.
+    stack: Vec<Option<Context>>,
+    /// Ensure this type is !Send as it relies on thread locals
+    _marker: PhantomData<*const ()>,
+}
+
+impl ContextStack {
+    #[inline(always)]
+    fn push(&mut self, cx: Context) -> usize {
+        // The next id is the length of the `stack`, plus one since we have the
+        // top of the [`ContextStack`] as the `current_cx`.
+        let next_id = self.stack.len() + 1;
+        let current_cx = std::mem::replace(&mut self.current_cx, cx);
+        self.stack.push(Some(current_cx));
+        next_id
+    }
+
+    #[inline(always)]
+    fn pop_id(&mut self, pos: usize) {
+        if pos == 0 {
+            // The empty context is always at the bottom of the [`ContextStack`]
+            // and cannot be popped, so do nothing.
+            return;
+        }
+        let len = self.stack.len();
+        // Are we at the top of the [`ContextStack`]?
+        if pos == len {
+            // Shrink the stack if possible to clear out any out of order pops.
+            while let Some(None) = self.stack.last() {
+                _ = self.stack.pop();
+            }
+            // Restore the previous context. This will always happen since the
+            // empty context is always at the bottom of the stack if the
+            // [`ContextStack`] is not empty.
+            if let Some(Some(next_cx)) = self.stack.pop() {
+                self.current_cx = next_cx;
+            }
+        } else {
+            // This is an out of order pop.
+            if pos >= len {
+                // This is an invalid id, ignore it.
+                return;
+            }
+            // Clear out the entry at the given id.
+            _ = self.stack[pos].take();
+        }
+    }
+
+    #[inline(always)]
+    fn map_current_cx<T>(&self, f: impl FnOnce(&Context) -> T) -> T {
+        f(&self.current_cx)
+    }
+}
+
+impl Default for ContextStack {
+    fn default() -> Self {
+        ContextStack {
+            current_cx: Context::default(),
+            stack: Vec::with_capacity(64),
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -425,7 +506,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "overlapping contexts are not supported yet"]
     fn overlapping_contexts() {
         #[derive(Debug, PartialEq)]
         struct ValueA(&'static str);
