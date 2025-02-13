@@ -312,6 +312,24 @@ impl Context {
         }
     }
 
+    /// Returns `true` if the context is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use opentelemetry::Context;
+    ///
+    /// assert!(Context::new().is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        let mut empty = self.entries.as_ref().map_or(true, |e| e.is_empty());
+        #[cfg(feature = "trace")]
+        {
+            empty = empty && self.span.is_none()
+        }
+        empty
+    }
+
     #[cfg(feature = "trace")]
     pub(super) fn current_with_synchronized_span(value: SynchronizedSpan) -> Self {
         Context {
@@ -348,7 +366,7 @@ impl fmt::Debug for Context {
 }
 
 /// A guard that resets the current context to the prior context when dropped.
-#[allow(missing_debug_implementations)]
+#[derive(Debug)]
 pub struct ContextGuard {
     // The position of the context in the stack. This is used to pop the context.
     cx_pos: usize,
