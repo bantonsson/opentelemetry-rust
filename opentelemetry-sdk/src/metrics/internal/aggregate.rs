@@ -6,7 +6,7 @@ use std::{
     time::SystemTime,
 };
 
-use crate::metrics::{data::AggregatedMetrics, Temporality};
+use crate::metrics::{data::Aggregation, Temporality};
 use opentelemetry::time::now;
 use opentelemetry::KeyValue;
 
@@ -38,7 +38,7 @@ pub(crate) trait ComputeAggregation: Send + Sync + 'static {
     /// If no initial aggregation exists, `dest` will be `None`, in which case the
     /// returned option is expected to contain a new aggregation with the data from
     /// the current collection cycle.
-    fn call(&self, dest: Option<&mut AggregatedMetrics>) -> (usize, Option<AggregatedMetrics>);
+    fn call(&self, dest: Option<&mut dyn Aggregation>) -> (usize, Option<Box<dyn Aggregation>>);
 }
 
 /// Separate `measure` and `collect` functions for an aggregate.
@@ -205,7 +205,7 @@ impl<T: Number> AggregateBuilder<T> {
 mod tests {
     use crate::metrics::data::{
         ExponentialBucket, ExponentialHistogram, ExponentialHistogramDataPoint, Gauge,
-        GaugeDataPoint, Histogram, HistogramDataPoint, MetricData, Sum, SumDataPoint,
+        GaugeDataPoint, Histogram, HistogramDataPoint, Sum, SumDataPoint,
     };
     use std::vec;
 
@@ -215,7 +215,7 @@ mod tests {
     fn last_value_aggregation() {
         let AggregateFns { measure, collect } =
             AggregateBuilder::<u64>::new(Temporality::Cumulative, None).last_value(None);
-        let mut a = MetricData::Gauge(Gauge {
+        let mut a = Gauge {
             data_points: vec![GaugeDataPoint {
                 attributes: vec![KeyValue::new("a", 1)],
                 value: 1u64,
@@ -223,15 +223,11 @@ mod tests {
             }],
             start_time: Some(now()),
             time: now(),
-        })
-        .into();
+        };
         let new_attributes = [KeyValue::new("b", 2)];
         measure.call(2, &new_attributes[..]);
 
         let (count, new_agg) = collect.call(Some(&mut a));
-        let AggregatedMetrics::U64(MetricData::Gauge(a)) = a else {
-            unreachable!()
-        };
 
         assert_eq!(count, 1);
         assert!(new_agg.is_none());
@@ -245,7 +241,7 @@ mod tests {
         for temporality in [Temporality::Delta, Temporality::Cumulative] {
             let AggregateFns { measure, collect } =
                 AggregateBuilder::<u64>::new(temporality, None).precomputed_sum(true);
-            let mut a = MetricData::Sum(Sum {
+            let mut a = Sum {
                 data_points: vec![
                     SumDataPoint {
                         attributes: vec![KeyValue::new("a1", 1)],
@@ -266,15 +262,11 @@ mod tests {
                     Temporality::Delta
                 },
                 is_monotonic: false,
-            })
-            .into();
+            };
             let new_attributes = [KeyValue::new("b", 2)];
             measure.call(3, &new_attributes[..]);
 
             let (count, new_agg) = collect.call(Some(&mut a));
-            let AggregatedMetrics::U64(MetricData::Sum(a)) = a else {
-                unreachable!()
-            };
 
             assert_eq!(count, 1);
             assert!(new_agg.is_none());
@@ -291,7 +283,7 @@ mod tests {
         for temporality in [Temporality::Delta, Temporality::Cumulative] {
             let AggregateFns { measure, collect } =
                 AggregateBuilder::<u64>::new(temporality, None).sum(true);
-            let mut a = MetricData::Sum(Sum {
+            let mut a = Sum {
                 data_points: vec![
                     SumDataPoint {
                         attributes: vec![KeyValue::new("a1", 1)],
@@ -312,15 +304,11 @@ mod tests {
                     Temporality::Delta
                 },
                 is_monotonic: false,
-            })
-            .into();
+            };
             let new_attributes = [KeyValue::new("b", 2)];
             measure.call(3, &new_attributes[..]);
 
             let (count, new_agg) = collect.call(Some(&mut a));
-            let AggregatedMetrics::U64(MetricData::Sum(a)) = a else {
-                unreachable!()
-            };
 
             assert_eq!(count, 1);
             assert!(new_agg.is_none());
@@ -337,7 +325,7 @@ mod tests {
         for temporality in [Temporality::Delta, Temporality::Cumulative] {
             let AggregateFns { measure, collect } = AggregateBuilder::<u64>::new(temporality, None)
                 .explicit_bucket_histogram(vec![1.0], true, true);
-            let mut a = MetricData::Histogram(Histogram {
+            let mut a = Histogram {
                 data_points: vec![HistogramDataPoint {
                     attributes: vec![KeyValue::new("a1", 1)],
                     count: 2,
@@ -355,15 +343,11 @@ mod tests {
                 } else {
                     Temporality::Delta
                 },
-            })
-            .into();
+            };
             let new_attributes = [KeyValue::new("b", 2)];
             measure.call(3, &new_attributes[..]);
 
             let (count, new_agg) = collect.call(Some(&mut a));
-            let AggregatedMetrics::U64(MetricData::Histogram(a)) = a else {
-                unreachable!()
-            };
 
             assert_eq!(count, 1);
             assert!(new_agg.is_none());
@@ -384,7 +368,7 @@ mod tests {
         for temporality in [Temporality::Delta, Temporality::Cumulative] {
             let AggregateFns { measure, collect } = AggregateBuilder::<u64>::new(temporality, None)
                 .exponential_bucket_histogram(4, 20, true, true);
-            let mut a = MetricData::ExponentialHistogram(ExponentialHistogram {
+            let mut a = ExponentialHistogram {
                 data_points: vec![ExponentialHistogramDataPoint {
                     attributes: vec![KeyValue::new("a1", 1)],
                     count: 2,
@@ -411,15 +395,11 @@ mod tests {
                 } else {
                     Temporality::Delta
                 },
-            })
-            .into();
+            };
             let new_attributes = [KeyValue::new("b", 2)];
             measure.call(3, &new_attributes[..]);
 
             let (count, new_agg) = collect.call(Some(&mut a));
-            let AggregatedMetrics::U64(MetricData::ExponentialHistogram(a)) = a else {
-                unreachable!()
-            };
 
             assert_eq!(count, 1);
             assert!(new_agg.is_none());
