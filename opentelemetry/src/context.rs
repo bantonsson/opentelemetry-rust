@@ -96,10 +96,15 @@ thread_local! {
 // 16-byte alignment for performance, which should be ok on 32-bit systems too
 #[repr(align(16))]
 pub struct Context {
+    flags: ContextFlags,
+    pub(crate) inner: Option<Arc<InnerContext>>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct InnerContext {
     #[cfg(feature = "trace")]
     pub(crate) span: Option<Arc<SynchronizedSpan>>,
     entries: Option<Arc<EntryMap>>,
-    flags: ContextFlags,
 }
 
 type EntryMap = HashMap<TypeId, Arc<dyn Any + Sync + Send>, BuildHasherDefault<IdHasher>>;
@@ -200,7 +205,9 @@ impl Context {
     /// assert_eq!(cx.get::<MyUser>(), None);
     /// ```
     pub fn get<T: 'static>(&self) -> Option<&T> {
-        self.entries
+        self.inner
+            .as_ref()?
+            .entries
             .as_ref()?
             .get(&TypeId::of::<T>())?
             .downcast_ref()
@@ -234,8 +241,10 @@ impl Context {
     /// assert_eq!(cx_with_a_and_b.get::<ValueB>(), Some(&ValueB(42)));
     /// ```
     pub fn with_value<T: 'static + Send + Sync>(&self, value: T) -> Self {
-        let entries = if let Some(current_entries) = &self.entries {
-            let mut inner_entries = (**current_entries).clone();
+        let entries = if let Some(current_entries) =
+            &self.inner.as_ref().and_then(|inner| inner.entries.as_ref())
+        {
+            let mut inner_entries = (***current_entries).clone();
             inner_entries.insert(TypeId::of::<T>(), Arc::new(value));
             Some(Arc::new(inner_entries))
         } else {
@@ -244,10 +253,13 @@ impl Context {
             Some(Arc::new(entries))
         };
         Context {
-            entries,
-            #[cfg(feature = "trace")]
-            span: self.span.clone(),
+            inner: Some(Arc::new(InnerContext {
+                entries,
+                #[cfg(feature = "trace")]
+                span: self.inner.as_ref().and_then(|inner| inner.span.clone()),
+            })),
             flags: self.flags,
+            ..Default::default()
         }
     }
 
@@ -335,7 +347,7 @@ impl Context {
     }
 
     /// Returns whether telemetry is suppressed in this context.
-    #[inline]
+    #[inline(always)]
     pub fn is_telemetry_suppressed(&self) -> bool {
         self.flags.is_telemetry_suppressed()
     }
@@ -343,10 +355,15 @@ impl Context {
     /// Returns a new context with telemetry suppression enabled.
     pub fn with_telemetry_suppressed(&self) -> Self {
         Context {
-            entries: self.entries.clone(),
-            #[cfg(feature = "trace")]
-            span: self.span.clone(),
+            inner: self.inner.as_ref().and_then(|inner| {
+                Some(Arc::new(InnerContext {
+                    entries: inner.entries.clone(),
+                    #[cfg(feature = "trace")]
+                    span: inner.span.clone(),
+                }))
+            }),
             flags: self.flags.with_telemetry_suppressed(),
+            ..Default::default()
         }
     }
 
@@ -405,7 +422,7 @@ impl Context {
     /// OpenTelemetry SDK components.
     ///
     ///
-    #[inline]
+    #[inline(always)]
     pub fn is_current_telemetry_suppressed() -> bool {
         Self::map_current(|cx| cx.is_telemetry_suppressed())
     }
@@ -413,18 +430,24 @@ impl Context {
     #[cfg(feature = "trace")]
     pub(crate) fn current_with_synchronized_span(value: SynchronizedSpan) -> Self {
         Self::map_current(|cx| Context {
-            span: Some(Arc::new(value)),
-            entries: cx.entries.clone(),
+            inner: Some(Arc::new(InnerContext {
+                span: Some(Arc::new(value)),
+                entries: cx.inner.as_ref().and_then(|inner| inner.entries.clone()),
+            })),
             flags: cx.flags,
+            ..Default::default()
         })
     }
 
     #[cfg(feature = "trace")]
     pub(crate) fn with_synchronized_span(&self, value: SynchronizedSpan) -> Self {
         Context {
-            span: Some(Arc::new(value)),
-            entries: self.entries.clone(),
+            inner: Some(Arc::new(InnerContext {
+                span: Some(Arc::new(value)),
+                entries: self.inner.as_ref().and_then(|inner| inner.entries.clone()),
+            })),
             flags: self.flags,
+            ..Default::default()
         }
     }
 }
@@ -434,10 +457,14 @@ impl fmt::Debug for Context {
         let mut dbg = f.debug_struct("Context");
 
         #[cfg(feature = "trace")]
-        let mut entries = self.entries.as_ref().map_or(0, |e| e.len());
+        let mut entries = self
+            .inner
+            .as_ref()
+            .and_then(|inner| inner.entries.as_ref())
+            .map_or(0, |e| e.len());
         #[cfg(feature = "trace")]
         {
-            if let Some(span) = &self.span {
+            if let Some(span) = &self.inner.as_ref().and_then(|inner| inner.span.as_ref()) {
                 dbg.field("span", &span.span_context());
                 entries += 1;
             } else {
@@ -504,6 +531,7 @@ impl Hasher for IdHasher {
 /// [`ContextGuard`] instances that are constructed using ids from it can't be
 /// moved to other threads. That means that the ids are always valid and that
 /// they are always within the bounds of the stack.
+#[repr(align(32))]
 struct ContextStack {
     /// This is the current [`Context`] that is active on this thread, and the top
     /// of the [`ContextStack`]. It is always present, and if the `stack` is empty

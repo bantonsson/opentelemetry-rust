@@ -284,7 +284,7 @@ impl TraceContextExt for Context {
     }
 
     fn span(&self) -> SpanRef<'_> {
-        if let Some(span) = self.span.as_ref() {
+        if let Some(span) = self.inner.as_ref().and_then(|inner| inner.span.as_ref()) {
             SpanRef(span)
         } else {
             SpanRef(&NOOP_SPAN)
@@ -292,7 +292,11 @@ impl TraceContextExt for Context {
     }
 
     fn has_active_span(&self) -> bool {
-        self.span.is_some()
+        if let Some(inner) = self.inner.as_ref() {
+            inner.span.is_some()
+        } else {
+            false
+        }
     }
 
     fn with_remote_span_context(&self, span_context: crate::trace::SpanContext) -> Self {

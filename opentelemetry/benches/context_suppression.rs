@@ -37,7 +37,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         // Make sure we're in a non-suppressed context
         let _restore_ctx = Context::current().attach();
         b.iter(|| {
-            let is_suppressed = black_box(Context::is_current_telemetry_suppressed());
+            let is_suppressed = black_box(is_current_telemetry_suppressed());
             black_box(is_suppressed);
         });
     });
@@ -47,12 +47,17 @@ fn criterion_benchmark(c: &mut Criterion) {
         // Enter suppressed context for the duration of the benchmark
         let _suppressed_guard = Context::enter_telemetry_suppressed_scope();
         b.iter(|| {
-            let is_suppressed = black_box(Context::is_current_telemetry_suppressed());
+            let is_suppressed = black_box(is_current_telemetry_suppressed());
             black_box(is_suppressed);
         });
     });
 
     group.finish();
+}
+
+#[inline(never)]
+fn is_current_telemetry_suppressed() -> bool {
+    Context::is_current_telemetry_suppressed()
 }
 
 criterion_group! {
