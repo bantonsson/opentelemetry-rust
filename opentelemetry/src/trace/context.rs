@@ -185,6 +185,24 @@ impl SpanRef<'_> {
         self.with_inner_mut(move |inner| inner.update_name(new_name))
     }
 
+    /// Adds [`Link`] to another [`SpanContext`].
+    ///
+    /// This method allows linking the current span to another span, identified by its `SpanContext`. Links can be used
+    /// to connect spans from different traces or within the same trace. Attributes can be attached to the link to
+    /// provide additional context or metadata.
+    ///
+    /// # Arguments
+    ///
+    /// * `span_context` - The `SpanContext` of the span to link to. This represents the target span's unique identifiers
+    ///   and trace information.
+    /// * `attributes` - A vector of `KeyValue` pairs that describe additional attributes of the link. These attributes
+    ///   can include any contextual information relevant to the link between the spans.
+    ///
+    /// [`Link`]: crate::trace::Link
+    pub fn add_link(&self, span_context: SpanContext, attributes: Vec<KeyValue>) {
+        self.with_inner_mut(move |inner| inner.add_link(span_context, attributes));
+    }
+
     /// Signals that the operation described by this span has now ended.
     pub fn end(&self) {
         self.end_with_timestamp(crate::time::now());
